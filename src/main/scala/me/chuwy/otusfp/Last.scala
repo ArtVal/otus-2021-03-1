@@ -40,7 +40,7 @@ object Last {
 
   val port = 8080
   val part = "foo"
-  val macroUri = uri"http://localh/api".
+  val macroUri = uri"http://localh/api"
   val r = Request[IO]().withUri(macroUri)
 
   val requestWithUser = Restful.httpApp(r).flatMap(resp => resp.as[String]).flatMap(IO.println)

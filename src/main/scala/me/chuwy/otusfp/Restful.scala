@@ -1,23 +1,27 @@
 package me.chuwy.otusfp
 
-import scala.concurrent.ExecutionContext.global
-
-import cats.data.{OptionT, Kleisli, ReaderT}
-
-import cats.effect.IO.{IOCont, Uncancelable}
+import cats.data.{Kleisli, OptionT}
+import cats.effect.IO.sleep
 import cats.effect._
-
-import io.circe.{JsonObject, DecodingFailure, Decoder, Encoder}
-import io.circe.generic.semiauto.{deriveEncoder, deriveDecoder}
-
-import org.http4s.{Request, Header, AuthedRoutes, HttpApp, HttpRoutes, Status, EntityDecoder, EntityEncoder}
+import fs2.Stream
+import io.circe.generic.semiauto.{deriveDecoder, deriveEncoder}
+import io.circe.syntax.EncoderOps
+import io.circe.{Decoder, DecodingFailure, Encoder, JsonObject}
+import org.http4s.Method.GET
 import org.http4s.blaze.server.BlazeServerBuilder
-import org.http4s.circe.{ jsonOf, jsonEncoderOf }
+import org.http4s.circe.CirceEntityCodec.circeEntityEncoder
+import org.http4s.circe.{jsonEncoder, jsonEncoderOf, jsonOf}
 import org.http4s.dsl.io._
 import org.http4s.implicits._
-import org.http4s.server.{AuthMiddleware, Router}
 import org.http4s.server.websocket.WebSocketBuilder
+import org.http4s.server.{AuthMiddleware, Router}
+import org.http4s._
 import org.typelevel.ci.CIString
+
+import java.util.concurrent.TimeUnit
+import scala.concurrent.ExecutionContext.global
+import scala.concurrent.duration.FiniteDuration
+import scala.util.Try
 
 object Restful {
 
@@ -117,4 +121,56 @@ object Restful {
     BlazeServerBuilder[IO](global)
       .bindHttp(port = 8080, host = "localhost")
       .withHttpApp(httpApp)
+
+
+  case class Counter(counter: Int)
+  implicit val counterEncoder: Encoder[Counter] = deriveEncoder[Counter]
+  implicit val counterDecoder: Decoder[Counter] = deriveDecoder[Counter]
+
+  implicit val counterEntityEncoder: EntityEncoder[IO, Counter] = jsonEncoderOf[IO, Counter]
+  implicit val counterEntityDecoder: EntityDecoder[IO, Counter] = jsonOf[IO, Counter]
+
+  val counterRef: IO[Ref[IO, Int]] = Ref.of[IO, Int](0)
+
+  def countService(counter: Ref[IO, Int]): HttpRoutes[IO] = HttpRoutes.of {
+    case GET -> Root / "counter" =>
+      for {
+        counterValue <- counter.updateAndGet(_ + 1)
+        result <- Ok(Counter(counterValue).asJson)
+      } yield result
+  }
+
+  object PositiveNum {
+    def unapply(num: String): Option[Either[String, Int]] = {
+      if(num.nonEmpty) {
+        Try(num.toInt).toEither match {
+          case Left(value) => Some(Left(value.toString))
+          case Right(value) => Some(Right(value))
+        }
+      } else {
+        Some(Left[String, Int]("Отсутствует значение"))
+      }
+    }
+  }
+  def slowService: HttpRoutes[IO] = HttpRoutes.of {
+    case GET -> Root / "slow" / PositiveNum(chunk) / PositiveNum(total) / PositiveNum(time) =>
+      val result = for {
+        chunkValue <- chunk
+        totalValue <- total
+        timeValue <- time
+      } yield {
+        Stream('A'.toByte)
+          .repeatN(totalValue)
+          .chunkN(chunkValue)
+          .covary[IO]
+          .evalMap(chunkElem => sleep(FiniteDuration.apply(timeValue, TimeUnit.SECONDS)).map {_ =>
+            chunkElem
+          })
+      }
+      result match {
+        case Left(value) => BadRequest(value)
+        case Right(value) => Ok(value)
+      }
+  }
+
 }
